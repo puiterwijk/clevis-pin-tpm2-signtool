@@ -13,3 +13,7 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+/publickey.json
+/privatekey.pem
+/clevis-pin-tpm2-signtool
