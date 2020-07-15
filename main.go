@@ -12,6 +12,7 @@ import (
 	"io/ioutil"
 	"os"
 
+	"github.com/puiterwijk/clevis-pin-tpm2-signtool/signtool"
 	"github.com/puiterwijk/tpm2-policy-simulator/simulator"
 )
 
@@ -20,24 +21,7 @@ const (
 	privateKeyLocation = "privatekey.pem"
 )
 
-type publicKeyRSA struct {
-	Scheme      string `json:"scheme"`
-	HashingAlgo string `json:"hashing_algo"`
-	Exponent    int    `json:"exponent"`
-	Modulus     []byte `json:"modulus"`
-}
-
-type publicKey struct {
-	Rsa publicKeyRSA `json:"RSA"`
-}
-
-type signedPolicyStepPCRs struct {
-	PcrIds        []int  `json:"pcr_ids"`
-	HashAlgorithm string `json:"hash_algorithm"`
-	Value         []byte `json:"value"`
-}
-
-func pcrSelToSignedPolicyStepPCRs(sel *simulator.PcrSelection) (*signedPolicyStepPCRs, error) {
+func pcrSelToSignedPolicyStepPCRs(sel *simulator.PcrSelection) (*signtool.SignedPolicyStepPCRs, error) {
 	algs := sel.GetHashAlgos()
 	if len(algs) != 1 {
 		return nil, fmt.Errorf("Invalid number of PCR hash algos selected")
@@ -57,7 +41,7 @@ func pcrSelToSignedPolicyStepPCRs(sel *simulator.PcrSelection) (*signedPolicySte
 		return nil, err
 	}
 	digest = hasher.Sum(nil)
-	return &signedPolicyStepPCRs{
+	return &signtool.SignedPolicyStepPCRs{
 		PcrIds:        sel.GetPcrIDs(alg),
 		HashAlgorithm: "SHA256",
 		Value:         digest,
@@ -65,7 +49,7 @@ func pcrSelToSignedPolicyStepPCRs(sel *simulator.PcrSelection) (*signedPolicySte
 }
 
 type signedPolicyStep struct {
-	Pcrs *signedPolicyStepPCRs `json:"PCRs,omitempty"`
+	Pcrs *signtool.SignedPolicyStepPCRs `json:"PCRs,omitempty"`
 }
 
 type signedPolicy struct {
@@ -84,8 +68,8 @@ func createNewKey() (*rsa.PrivateKey, error) {
 		return nil, err
 	}
 
-	pubkey := publicKey{
-		Rsa: publicKeyRSA{
+	pubkey := signtool.PublicKey{
+		Rsa: signtool.PublicKeyRSA{
 			Scheme:      "RSASSA",
 			HashingAlgo: "SHA256",
 			Exponent:    key.E,
