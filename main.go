@@ -1,15 +1,18 @@
 package main
 
 import (
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io/ioutil"
 	"os"
+
+	"github.com/puiterwijk/tpm2-policy-simulator/simulator"
 )
 
 const (
@@ -21,12 +24,57 @@ type publicKeyRSA struct {
 	Scheme      string `json:"scheme"`
 	HashingAlgo string `json:"hashing_algo"`
 	Exponent    int    `json:"exponent"`
-	Modulus     string `json:"modulus"`
+	Modulus     []byte `json:"modulus"`
 }
 
 type publicKey struct {
 	Rsa publicKeyRSA `json:"RSA"`
 }
+
+type signedPolicyStepPCRs struct {
+	PcrIds        []int  `json:"pcr_ids"`
+	HashAlgorithm string `json:"hash_algorithm"`
+	Value         []byte `json:"value"`
+}
+
+func pcrSelToSignedPolicyStepPCRs(sel *simulator.PcrSelection) (*signedPolicyStepPCRs, error) {
+	algs := sel.GetHashAlgos()
+	if len(algs) != 1 {
+		return nil, fmt.Errorf("Invalid number of PCR hash algos selected")
+	}
+	alg := algs[0]
+	algtype := alg.ToCryptoHash()
+	if algtype != crypto.SHA256 {
+		return nil, fmt.Errorf("Unsupported hash algo used for PCR selection")
+	}
+	digest, err := sel.GetDigest()
+	if err != nil {
+		return nil, err
+	}
+	hasher := algtype.New()
+	_, err = hasher.Write(digest)
+	if err != nil {
+		return nil, err
+	}
+	digest = hasher.Sum(nil)
+	return &signedPolicyStepPCRs{
+		PcrIds:        sel.GetPcrIDs(alg),
+		HashAlgorithm: "SHA256",
+		Value:         digest,
+	}, nil
+}
+
+type signedPolicyStep struct {
+	Pcrs *signedPolicyStepPCRs `json:"PCRs,omitempty"`
+}
+
+type signedPolicy struct {
+	PolicyRef []byte             `json:"policy_ref"`
+	Steps     []signedPolicyStep `json:"steps"`
+	Signature []byte             `json:"signature"`
+}
+
+type signedPolicyList []signedPolicy
 
 func createNewKey() (*rsa.PrivateKey, error) {
 	fmt.Println("No private key found, generating a new one")
@@ -36,13 +84,12 @@ func createNewKey() (*rsa.PrivateKey, error) {
 		return nil, err
 	}
 
-	pubmod := base64.RawURLEncoding.EncodeToString(key.N.Bytes())
 	pubkey := publicKey{
 		Rsa: publicKeyRSA{
 			Scheme:      "RSASSA",
 			HashingAlgo: "SHA256",
 			Exponent:    key.E,
-			Modulus:     pubmod,
+			Modulus:     key.N.Bytes(),
 		},
 	}
 	pubkeyJSON, err := json.Marshal(pubkey)
@@ -101,10 +148,80 @@ func getKey() (*rsa.PrivateKey, error) {
 	return privateKey, nil
 }
 
+func createPolicy() (signedPolicyStep, []byte) {
+	pcr0, err := hex.DecodeString("0E6B3C126514CF40E0D10AF7032910DF16F2C2152E5043D7662A8CFB5FA8692D")
+	if err != nil {
+		panic(err)
+	}
+	pcr1, err := hex.DecodeString("3D458CFE55CC03EA1F443F1562BEEC8DF51C75E14A9FCF9A7234A13F198E7968")
+	if err != nil {
+		panic(err)
+	}
+
+	sel := simulator.NewPcrSelection()
+	sel.AddSelection(crypto.SHA256, 0, pcr0)
+	sel.AddSelection(crypto.SHA256, 1, pcr1)
+
+	step, err := pcrSelToSignedPolicyStepPCRs(sel)
+	if err != nil {
+		panic(err)
+	}
+
+	sim, err := simulator.NewSimulator(crypto.SHA256)
+	if err != nil {
+		panic(err)
+	}
+	err = sim.PolicyPCR(sel)
+	if err != nil {
+		panic(err)
+	}
+
+	return signedPolicyStep{
+		Pcrs: step,
+	}, sim.GetDigest()
+}
+
 func main() {
 	privkey, err := getKey()
 	if err != nil {
 		panic(fmt.Sprintf("Error getting private key: %s", err))
 	}
-	fmt.Println("Private key: ", privkey)
+
+	policyRef := make([]byte, 0)
+
+	step, policyDigest := createPolicy()
+
+	ahash := append(policyDigest, policyRef...)
+	ahashSummer := crypto.SHA256.New()
+	_, err = ahashSummer.Write(ahash)
+	if err != nil {
+		panic(err)
+	}
+	ahash = ahashSummer.Sum(nil)
+
+	signature, err := rsa.SignPKCS1v15(nil, privkey, crypto.SHA256, ahash)
+	if err != nil {
+		panic(err)
+	}
+
+	plist := signedPolicyList{
+		signedPolicy{
+			PolicyRef: []byte(""),
+			Signature: signature,
+			Steps: []signedPolicyStep{
+				step,
+			},
+		},
+	}
+
+	pListEnc, err := json.Marshal(plist)
+	if err != nil {
+		panic(err)
+	}
+
+	err = ioutil.WriteFile("testpolicy.json", pListEnc, 0644)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Signed policy list written")
 }
