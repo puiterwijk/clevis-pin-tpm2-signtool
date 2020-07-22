@@ -26,6 +26,8 @@ import (
 	"io/ioutil"
 	"os"
 
+	"gopkg.in/yaml.v2"
+
 	"github.com/puiterwijk/clevis-pin-tpm2-signtool/signtool"
 	"github.com/puiterwijk/tpm2-policy-simulator/simulator"
 )
@@ -62,6 +64,27 @@ func pcrSelToSignedPolicyStepPCRs(sel *simulator.PcrSelection) (*signtool.Signed
 	}, nil
 }
 
+type policyRequestStepPCRSelection struct {
+	PcrID int    `yaml:"pcr_id"`
+	Value string `yaml:"value"`
+}
+
+type policyRequestStepPCR struct {
+	HashAlgorithm string                          `yaml:"hash_algorithm"`
+	Selection     []policyRequestStepPCRSelection `yaml:"selection"`
+}
+
+type policyRequestStep struct {
+	Pcrs *policyRequestStepPCR `yaml:"PCRs,omitempty"`
+}
+
+type policyRequest struct {
+	PolicyRef string              `yaml:"policy_ref"`
+	Steps     []policyRequestStep `yaml:"steps"`
+}
+
+type policyRequestList []policyRequest
+
 type signedPolicyStep struct {
 	Pcrs *signtool.SignedPolicyStepPCRs `json:"PCRs,omitempty"`
 }
@@ -75,7 +98,7 @@ type signedPolicy struct {
 type signedPolicyList []signedPolicy
 
 func createNewKey() (*rsa.PrivateKey, error) {
-	fmt.Println("No private key found, generating a new one")
+	fmt.Fprintln(os.Stderr, "No private key found, generating a new one")
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -146,37 +169,77 @@ func getKey() (*rsa.PrivateKey, error) {
 	return privateKey, nil
 }
 
-func createPolicy() (signedPolicyStep, []byte) {
-	pcr0, err := hex.DecodeString("0E6B3C126514CF40E0D10AF7032910DF16F2C2152E5043D7662A8CFB5FA8692D")
-	if err != nil {
-		panic(err)
-	}
-	pcr1, err := hex.DecodeString("3D458CFE55CC03EA1F443F1562BEEC8DF51C75E14A9FCF9A7234A13F198E7968")
-	if err != nil {
-		panic(err)
+func playStep(step policyRequestStep, sim *simulator.Tpm2PolicySimulator) (*signedPolicyStep, error) {
+	if step.Pcrs != nil {
+		sel := simulator.NewPcrSelection()
+		for _, pcrsel := range step.Pcrs.Selection {
+			pcrval, err := hex.DecodeString(pcrsel.Value)
+			if err != nil {
+				return nil, fmt.Errorf("Error decoding PCR value hex: %s", err)
+			}
+			sel.AddSelection(crypto.SHA256, pcrsel.PcrID, pcrval)
+		}
+
+		step, err := pcrSelToSignedPolicyStepPCRs(sel)
+		if err != nil {
+			return nil, err
+		}
+		err = sim.PolicyPCR(sel)
+		if err != nil {
+			return nil, err
+		}
+
+		return &signedPolicyStep{
+			Pcrs: step,
+		}, nil
 	}
 
-	sel := simulator.NewPcrSelection()
-	sel.AddSelection(crypto.SHA256, 0, pcr0)
-	sel.AddSelection(crypto.SHA256, 1, pcr1)
+	return nil, fmt.Errorf("Unrecognized policy step")
+}
 
-	step, err := pcrSelToSignedPolicyStepPCRs(sel)
-	if err != nil {
-		panic(err)
-	}
+func playSteps(steps []policyRequestStep) ([]signedPolicyStep, []byte, error) {
+	outsteps := make([]signedPolicyStep, len(steps))
 
 	sim, err := simulator.NewSimulator(crypto.SHA256)
 	if err != nil {
-		panic(err)
-	}
-	err = sim.PolicyPCR(sel)
-	if err != nil {
-		panic(err)
+		return nil, nil, err
 	}
 
-	return signedPolicyStep{
-		Pcrs: step,
-	}, sim.GetDigest()
+	for i, step := range steps {
+		sigstep, err := playStep(step, sim)
+		if err != nil {
+			return nil, nil, err
+		}
+		outsteps[i] = *sigstep
+	}
+	return outsteps, sim.GetDigest(), nil
+}
+
+func signPolicy(privkey *rsa.PrivateKey, request policyRequest) (*signedPolicy, error) {
+	sigpol := new(signedPolicy)
+	sigpol.PolicyRef = []byte(request.PolicyRef)
+
+	steps, policyDigest, err := playSteps(request.Steps)
+	if err != nil {
+		return nil, err
+	}
+	sigpol.Steps = steps
+
+	ahash := append(policyDigest, sigpol.PolicyRef...)
+	ahashSummer := crypto.SHA256.New()
+	_, err = ahashSummer.Write(ahash)
+	if err != nil {
+		return nil, err
+	}
+	ahash = ahashSummer.Sum(nil)
+
+	signature, err := rsa.SignPKCS1v15(nil, privkey, crypto.SHA256, ahash)
+	if err != nil {
+		return nil, err
+	}
+
+	sigpol.Signature = signature
+	return sigpol, nil
 }
 
 func main() {
@@ -185,41 +248,29 @@ func main() {
 		panic(fmt.Sprintf("Error getting private key: %s", err))
 	}
 
-	policyRef := make([]byte, 0)
-
-	step, policyDigest := createPolicy()
-
-	ahash := append(policyDigest, policyRef...)
-	ahashSummer := crypto.SHA256.New()
-	_, err = ahashSummer.Write(ahash)
+	policyIn, err := ioutil.ReadAll(os.Stdin)
 	if err != nil {
 		panic(err)
 	}
-	ahash = ahashSummer.Sum(nil)
-
-	signature, err := rsa.SignPKCS1v15(nil, privkey, crypto.SHA256, ahash)
+	var policy policyRequestList
+	err = yaml.Unmarshal(policyIn, &policy)
 	if err != nil {
 		panic(err)
 	}
 
-	plist := signedPolicyList{
-		signedPolicy{
-			PolicyRef: []byte(""),
-			Signature: signature,
-			Steps: []signedPolicyStep{
-				step,
-			},
-		},
+	signedPolicies := make([]signedPolicy, len(policy))
+
+	for i, polreq := range policy {
+		sigpol, err := signPolicy(privkey, polreq)
+		if err != nil {
+			panic(err)
+		}
+		signedPolicies[i] = *sigpol
 	}
 
-	pListEnc, err := json.Marshal(plist)
+	pListEnc, err := json.Marshal(signedPolicies)
 	if err != nil {
 		panic(err)
 	}
-
-	err = ioutil.WriteFile("testpolicy.json", pListEnc, 0644)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("Signed policy list written")
+	fmt.Print(string(pListEnc))
 }
