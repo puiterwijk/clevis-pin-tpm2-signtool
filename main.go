@@ -90,7 +90,7 @@ type signedPolicyStep struct {
 }
 
 type signedPolicy struct {
-	PolicyRef []byte             `json:"policy_ref"`
+	PolicyRef []byte             `json:"policy_ref,omitempty"`
 	Steps     []signedPolicyStep `json:"steps"`
 	Signature []byte             `json:"signature"`
 }
