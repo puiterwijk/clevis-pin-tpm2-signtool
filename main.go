@@ -61,6 +61,7 @@ func pcrSelToSignedPolicyStepPCRs(sel *simulator.PcrSelection) (*signtool.Signed
 		PcrIds:        sel.GetPcrIDs(alg),
 		HashAlgorithm: "SHA256",
 		Value:         digest,
+		PcrValues:     sel.GetValues(alg),
 	}, nil
 }
 

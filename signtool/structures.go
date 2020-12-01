@@ -26,7 +26,8 @@ type PublicKey struct {
 }
 
 type SignedPolicyStepPCRs struct {
-	PcrIds        []int  `json:"pcr_ids"`
-	HashAlgorithm string `json:"hash_algorithm"`
-	Value         []byte `json:"value"`
+	PcrIds        []int          `json:"pcr_ids"`
+	HashAlgorithm string         `json:"hash_algorithm"`
+	PcrValues     map[int][]byte `json:"pcr_values"`
+	Value         []byte         `json:"value"`
 }
